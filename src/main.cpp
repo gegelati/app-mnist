@@ -103,7 +103,7 @@ int main() {
 	std::cout << "Number of threads: " << params.nbThreads << std::endl;
 
 	// Instantiate and init the learning agent
-	Learn::ClassificationLearningAgent la(mnistLE, set, params);
+	Learn::ParallelLearningAgent la(mnistLE, set, params);
 	la.init();
 
 	// Create an exporter for all graphs
@@ -145,13 +145,13 @@ int main() {
 		la.trainOneGeneration(i);
 
 		if (printStats) {
-			mnistLE.printClassifStatsTable(la.getTPGGraph()->getEnvironment(), la.getBestRoot().first);
+			mnistLE.printClassifStatsTable(la.getTPGGraph()->getEnvironment(), la.getSelector()->getBestRoot().first);
 			printStats = false;
 		}
 	}
 
 	// Keep best policy
-	la.keepBestPolicy();
+	la.getSelector()->keepBestPolicy();
 
 	// Clear introns instructions
 	la.getTPGGraph()->clearProgramIntrons();
@@ -162,7 +162,7 @@ int main() {
 
 	TPG::PolicyStats ps;
 	ps.setEnvironment(la.getTPGGraph()->getEnvironment());
-	ps.analyzePolicy(la.getBestRoot().first);
+	ps.analyzePolicy(la.getSelector()->getBestRoot().first);
 	std::ofstream bestStats;
 	bestStats.open("out_best_stats.md");
 	bestStats << ps;
