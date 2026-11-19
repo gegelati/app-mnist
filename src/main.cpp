@@ -7,37 +7,7 @@
 
 #include <gegelati.h>
 
-#include "mnist.h"
-
-void getKey(std::atomic<bool>& exit, std::atomic<bool>& printStats) {
-	std::cout << std::endl;
-	std::cout << "Press `q` then [Enter] to exit." << std::endl;
-	std::cout << "Press `p` then [Enter] to print classification statistics of the best root." << std::endl;
-	std::cout.flush();
-
-	exit = false;
-
-	while (!exit) {
-		char c;
-		std::cin >> c;
-		switch (c) {
-		case 'q':
-		case 'Q':
-			exit = true;
-			break;
-		case 'p':
-		case 'P':
-			printStats = true;
-			break;
-		default:
-			printf("Invalid key '%c' pressed.", c);
-			std::cout.flush();
-		}
-	}
-
-	printf("Program will terminate at the end of next generation.\n");
-	std::cout.flush();
-}
+#include "mnist_reader/mnist_reader.hpp"
 
 int main() {
 	std::cout << "Start MNIST application." << std::endl;
@@ -51,7 +21,6 @@ int main() {
 	auto max = [](double a, double b)->double {return std::max(a, b); };
 	auto ln = [](double a)->double {return std::log(a); };
 	auto exp = [](double a)->double {return std::exp(a); };
-	auto multByConst = [](double a, Data::Constant c)->double {return a * (double)c / 10.0; };
 	auto sobelMagn = [](const double a[3][3])->double {
 		double result = 0.0;
 		double gx =
@@ -75,115 +44,80 @@ int main() {
 		result = std::atan(gy / gx);
 		return result;
 	};
+	
+	set.add(*(new Instructions::LambdaInstruction<double, double, double>(minus)));
+	set.add(*(new Instructions::LambdaInstruction<double, double, double>(add)));
+	set.add(*(new Instructions::LambdaInstruction<double, double, double>(mult)));
+	set.add(*(new Instructions::LambdaInstruction<double, double, double>(div)));
+	set.add(*(new Instructions::LambdaInstruction<double, double, double>(max)));
+	set.add(*(new Instructions::LambdaInstruction<double, double>(exp)));
+	set.add(*(new Instructions::LambdaInstruction<double, double>(ln)));
+	set.add(*(new Instructions::LambdaInstruction<double, const double[3][3]>(sobelMagn)));
+	set.add(*(new Instructions::LambdaInstruction<double, const double[3][3]>(sobelDir)));
 
-	set.add(*(new Instructions::LambdaInstruction<double, double>(minus)));
-	set.add(*(new Instructions::LambdaInstruction<double, double>(add)));
-	set.add(*(new Instructions::LambdaInstruction<double, double>(mult)));
-	set.add(*(new Instructions::LambdaInstruction<double, double>(div)));
-	set.add(*(new Instructions::LambdaInstruction<double, double>(max)));
-	set.add(*(new Instructions::LambdaInstruction<double>(exp)));
-	set.add(*(new Instructions::LambdaInstruction<double>(ln)));
-	set.add(*(new Instructions::LambdaInstruction<double, Data::Constant>(multByConst)));
-	set.add(*(new Instructions::LambdaInstruction<const double[3][3]>(sobelMagn)));
-	set.add(*(new Instructions::LambdaInstruction<const double[3][3]>(sobelDir)));
+	/// Build MNIST
+    mnist::MNIST_dataset<std::vector, std::vector<double>, uint8_t> mnist(mnist::read_dataset<std::vector, std::vector, double, uint8_t>(MNIST_DATA_LOCATION));
+    Dimensions::Requirement inputReq = Dimensions::Requirement(Data::DataType::type<double>({28, 28}));
+    Dimensions::Requirement outputReq = Dimensions::Requirement(Data::DataType::type<size_t>());
+    Evaluation::DataSet dataSet({inputReq}, outputReq);
 
-	// Set the parameters for the learning process.
-	// (Controls mutations probability, program lengths, and graph size
-	// among other things)
-	// Loads them from the file params.json
-	Learn::LearningParameters params;
-	File::ParametersParser::loadParametersFromJson(ROOT_DIR "/params.json", params);
-#ifdef NB_GENERATIONS
-	params.nbGenerations = NB_GENERATIONS;
-#endif // !NB_GENERATIONS
+	/// Add training images
+    std::vector<std::vector<double>> trainingImages = mnist.training_images;
+    std::vector<uint8_t> trainingLabels = mnist.training_labels;
+    for(size_t idx = 0; idx < trainingImages.size(); idx++) {
+        std::vector<Data::DataValue> inputs;
+        inputs.push_back(Data::DataValue::array2d<std::vector<double>>(trainingImages.at(idx), 28, 28));
+        dataSet.addData(std::move(inputs), Data::DataValue::scalar<uint64_t>(static_cast<uint64_t>(trainingLabels.at(idx))));
+    }
 
-	// Instantiate the LearningEnvironment
-	MNIST mnistLE;
+	/// Add validation images
+    std::vector<std::vector<double>> testImages = mnist.test_images;
+    std::vector<uint8_t> testLabels = mnist.test_labels;
+    for(size_t idx = 0; idx < testImages.size(); idx++) {
+        std::vector<Data::DataValue> inputs;
+        inputs.push_back(Data::DataValue::array2d<std::vector<double>>(testImages.at(idx), 28, 28));
+        dataSet.addData(std::move(inputs), Data::DataValue::scalar<uint64_t>(static_cast<uint64_t>(testLabels.at(idx))), false);
+    }
 
-	std::cout << "Number of threads: " << params.nbThreads << std::endl;
+	auto problem = std::make_shared<Evaluation::PredictionProblem>(dataSet, 0, "MNIST");
 
-	// Instantiate and init the learning agent
-	Learn::ClassificationLearningAgent la(mnistLE, set, params);
-	la.init();
 
-	// Create an exporter for all graphs
-	File::TPGGraphDotExporter dotExporter("out_0000.dot", *la.getTPGGraph());
+	// for building MNIST with LGP
+	/*
+	auto representation = std::make_shared<Representations::LGP>(problem->getInputDimensions(), Data::DataType::type<double>({15}), set, Data::DataType::type<double>({10}), 1, 20, "MyLGP");
+	auto tanh = std::make_unique<Dimensions::ActivationFunctions::ArgMax<double>>(representation->getDimensionFlow().getOutputDimension());
+	representation->addOutputFunction(std::move(tanh));
 
-	// Start a thread for controlling the loop
-#ifndef NO_CONSOLE_CONTROL
-	std::atomic<bool> exitProgram = true; // (set to false by other thread) 
-	std::atomic<bool> printStats = false;
+	Evolution::BasicEvolutionConfig config;
+	*/
 
-	std::thread threadKeyboard(getKey, std::ref(exitProgram), std::ref(printStats));
 
-	while (exitProgram); // Wait for other thread to print key info.
-#else 
-	std::atomic<bool> exitProgram = false; // (set to false by other thread) 
-	std::atomic<bool> printStats = false;
-#endif
+	// For building MNIST with TPG
+	/**/
+	auto lgpRep = std::make_shared<Representations::LGP>(problem->getInputDimensions(), Data::DataType::type<double>({8}), set, Data::DataType::type<double>({1}), 1, 20, "MyLGP");
+	auto tpgRep = std::make_shared<Representations::TPG>(problem->getInputDimensions(), 10, 2, 10, "MyTPG");
 
-	// Adds a logger to the LA (to get statistics on learning) on std::cout
-	Log::LABasicLogger logCout(la);
+	Evolution::OriginTPGEvolutionConfig config;
+	config.memberRepresentation = lgpRep;
+	config.teamDestinationProbability = 0.5;
 
-	// File for printing best policy stat.
-	std::ofstream stats;
-	stats.open("bestPolicyStats.md");
-	Log::LAPolicyStatsLogger logStats(la, stats);
 
-	// Export parameters before starting training.
-	// These may differ from imported parameters because of LE or machine specific
-	// settings such as thread count of number of actions.
-	File::ParametersParser::writeParametersToJson("exported_params.json", params);
+	config.problem = problem;
+	config.representation = tpgRep;
+	config.nbTrainingIterations = 100;
+	config.nbValidationIterations = 100;
+	config.sizePopulation = 100;
+	config.nbOffspring = 200;
+	config.nbThreads = 2;
+	
+	// In classification, you want the F1 metric
+	// config.assigner = std::make_shared<FitnessAssignment::ClassificationF1Assigner>();
 
-	// Train for NB_GENERATIONS generations
-	for (int i = 0; i < params.nbGenerations && !exitProgram; i++) {
-		char buff[13];
-		sprintf(buff, "out_%04d.dot", i);
-		dotExporter.setNewFilePath(buff);
-		dotExporter.print();
+	std::shared_ptr<Evolution::Module> module = config.buildModule();
 
-		la.trainOneGeneration(i);
-
-		if (printStats) {
-			mnistLE.printClassifStatsTable(la.getTPGGraph()->getEnvironment(), la.getBestRoot().first);
-			printStats = false;
-		}
-	}
-
-	// Keep best policy
-	la.keepBestPolicy();
-
-	// Clear introns instructions
-	la.getTPGGraph()->clearProgramIntrons();
-
-	// Export the graph
-	dotExporter.setNewFilePath("out_best.dot");
-	dotExporter.print();
-
-	TPG::PolicyStats ps;
-	ps.setEnvironment(la.getTPGGraph()->getEnvironment());
-	ps.analyzePolicy(la.getBestRoot().first);
-	std::ofstream bestStats;
-	bestStats.open("out_best_stats.md");
-	bestStats << ps;
-	bestStats.close();
-
-	// close log file also
-	stats.close();
-
-	// Print stats one last time
-	mnistLE.printClassifStatsTable(la.getTPGGraph()->getEnvironment(), la.getTPGGraph()->getRootVertices().at(0));
-
-	// cleanup
-	for (unsigned int i = 0; i < set.getNbInstructions(); i++) {
-		delete (&set.getInstruction(i));
-	}
-
-#ifndef NO_CONSOLE_CONTROL
-	// Exit the thread
-	std::cout << "Exiting program, press a key then [enter] to exit if nothing happens.";
-	threadKeyboard.join();
-#endif
+	std::cout<<module->summary(1)<<std::endl;
+	Evolution::EvolutionData data = module->evolve(100, 2);
+	std::cout<<data.summary()<<std::endl;
 
 	return 0;
 }
